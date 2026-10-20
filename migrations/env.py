@@ -3,8 +3,9 @@ import os
 from alembic import context
 from sqlalchemy import create_engine, pool
 
-# Set this to the application's SQLAlchemy metadata when models are added.
-target_metadata = None
+from payment_service.models import Base
+
+target_metadata = Base.metadata
 
 database_url = os.environ.get("DATABASE_URL", "")
 if not database_url:
