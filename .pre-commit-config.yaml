@@ -1,0 +1,70 @@
+minimum_pre_commit_version: "4.0.0"
+default_stages: [pre-commit]
+
+# Use the project environment so uv.lock controls every tool version.
+repos:
+  - repo: local
+    hooks:
+      - id: check-yaml
+        name: Check YAML
+        entry: uv run --locked --offline check-yaml
+        language: system
+        types: [yaml]
+
+      - id: check-toml
+        name: Check TOML
+        entry: uv run --locked --offline check-toml
+        language: system
+        types: [toml]
+
+      - id: check-merge-conflict
+        name: Check merge conflict markers
+        entry: uv run --locked --offline check-merge-conflict --assume-in-merge
+        language: system
+        types: [text]
+
+      - id: detect-private-key
+        name: Check private keys
+        entry: uv run --locked --offline detect-private-key
+        language: system
+        types: [text]
+
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+        entry: uv run --locked --offline trailing-whitespace-fixer
+        language: system
+        types: [text]
+
+      - id: end-of-file-fixer
+        name: Fix end of files
+        entry: uv run --locked --offline end-of-file-fixer
+        language: system
+        types: [text]
+        # Preserve the supplied SQL exactly as received.
+        exclude: ^docs/requirements/quick-start-schema\.sql$
+
+      - id: uv-lock
+        name: Check uv.lock consistency
+        entry: uv lock --check --offline
+        language: system
+        files: ^(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
+
+      - id: ruff-check
+        name: Ruff lint and fixes
+        entry: uv run --locked --offline ruff check --fix
+        language: system
+        types_or: [python, pyi]
+
+      - id: ruff-format
+        name: Ruff format
+        entry: uv run --locked --offline ruff format
+        language: system
+        types_or: [python, pyi]
+
+      - id: ty
+        name: Check project types
+        entry: uv run --locked --offline ty check
+        language: system
+        files: (\.pyi?$|^pyproject\.toml$|^uv\.lock$)
+        pass_filenames: false

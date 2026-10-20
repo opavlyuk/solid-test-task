@@ -1,0 +1,49 @@
+name: solid-test-task
+
+x-app: &app
+  build: .
+  image: solid-test-task-app
+  environment:
+    DATABASE_URL: postgresql+psycopg://
+    PGHOST: db
+    PGPORT: "5432"
+    PGDATABASE: ${PGDATABASE:?Set PGDATABASE in .env}
+    PGUSER: ${PGUSER:?Set PGUSER in .env}
+    PGPASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+
+services:
+  app:
+    <<: *app
+    init: true
+    # Keep the development environment available until an HTTP entry point exists.
+    command: ["sleep", "infinity"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+
+  db-init:
+    <<: *app
+    command: ["sh", "-c", "alembic upgrade head && python scripts/seed_dev_db.py"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${PGDATABASE:?Set PGDATABASE in .env}
+      POSTGRES_USER: ${PGUSER:?Set PGUSER in .env}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?Set PGPASSWORD in .env}
+    ports:
+      - "127.0.0.1:${PGPORT:-5433}:5432"
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
