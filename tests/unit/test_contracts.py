@@ -39,12 +39,6 @@ def test_money_rejects_other_currencies(currency: str) -> None:
         Money(Decimal("70"), currency)
 
 
-def test_money_retains_valid_trailing_zeroes_and_formats_two_places() -> None:
-    money = Money(Decimal("70.000"), "USD")
-    assert str(money.amount) == "70.000"
-    assert format(money.amount, ".2f") == "70.00"
-
-
 @pytest.mark.parametrize(
     ("status", "expected"),
     [

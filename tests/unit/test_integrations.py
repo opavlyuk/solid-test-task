@@ -17,16 +17,34 @@ from payment_service.services.contracts import (
 PAYMENT_ID = UUID("11111111-1111-1111-1111-111111111111")
 
 
-def request_for(token: str) -> ChargeRequest:
-    return ChargeRequest(PAYMENT_ID, Money(Decimal("70"), "USD"), token)
+def request_for(token: str, payment_id: UUID = PAYMENT_ID) -> ChargeRequest:
+    return ChargeRequest(payment_id, Money(Decimal("70"), "USD"), token)
 
 
-@pytest.mark.parametrize("token", ["tok_test_alice_visa", "another_nonempty_token"])
-def test_gateway_success_reference_is_deterministic(token: str) -> None:
+@pytest.mark.parametrize(
+    ("token", "payment_id", "expected_reference"),
+    [
+        pytest.param(
+            "tok_test_alice_visa",
+            PAYMENT_ID,
+            "mock_11111111-1111-1111-1111-111111111111",
+            id="seeded-token",
+        ),
+        pytest.param(
+            "another_nonempty_token",
+            UUID("22222222-2222-2222-2222-222222222222"),
+            "mock_22222222-2222-2222-2222-222222222222",
+            id="other-payment",
+        ),
+    ],
+)
+def test_gateway_success_reference_is_deterministic(
+    token: str, payment_id: UUID, expected_reference: str
+) -> None:
     gateway = MockPaymentGateway()
-    expected = ChargeSucceeded("mock_11111111-1111-1111-1111-111111111111")
-    assert gateway.charge(request_for(token)) == expected
-    assert gateway.charge(request_for(token)) == expected
+    expected = ChargeSucceeded(expected_reference)
+    assert gateway.charge(request_for(token, payment_id)) == expected
+    assert gateway.charge(request_for(token, payment_id)) == expected
 
 
 def test_gateway_returns_confirmed_decline() -> None:
@@ -49,7 +67,6 @@ def test_gateway_rejects_empty_token() -> None:
 def test_demo_total_is_explicit_for_seeded_cart() -> None:
     provider = DemoTotalProvider()
     cart_id = UUID("c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1")
-    assert provider.get_total(cart_id) == Money(Decimal("70.00"), "USD")
     assert provider.get_total(cart_id) == Money(Decimal("70.00"), "USD")
 
 

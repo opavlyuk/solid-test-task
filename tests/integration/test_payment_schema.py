@@ -46,10 +46,12 @@ def insert_payment(
     ).scalar_one()
 
 
-def assert_violation(error: IntegrityError, state: str, constraint: str) -> None:
+def assert_violation(
+    error: IntegrityError, sqlstate: str, constraint_name: str
+) -> None:
     assert isinstance(error.orig, psycopg.Error)
-    assert error.orig.sqlstate == state
-    assert error.orig.diag.constraint_name == constraint
+    assert error.orig.sqlstate == sqlstate
+    assert error.orig.diag.constraint_name == constraint_name
 
 
 @pytest.mark.parametrize(
@@ -230,9 +232,9 @@ def test_failed_attempts_allow_another_payment(
 
 
 def test_orm_round_trip_preserves_values_after_commit(
-    sessions: sessionmaker[Session], shop: dict[str, UUID]
+    session_factory: sessionmaker[Session], shop: dict[str, UUID]
 ) -> None:
-    with sessions.begin() as session:
+    with session_factory.begin() as session:
         payment = Payment(
             user_id=shop["user_id"],
             cart_id=shop["cart_id"],
@@ -245,7 +247,7 @@ def test_orm_round_trip_preserves_values_after_commit(
         session.add(payment)
     # A detached result stays readable because the factory disables expiration.
     assert payment.amount == Decimal("70.00")
-    with sessions() as session:
+    with session_factory() as session:
         stored = session.get(Payment, payment.id)
         assert stored is not None
         assert stored.status is PaymentStatus.PENDING

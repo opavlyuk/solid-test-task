@@ -65,7 +65,9 @@ def engine(migrated_engine: Engine) -> Iterator[Engine]:
 
 
 @pytest.fixture
-def sessions(database_url: str, engine: Engine) -> Iterator[sessionmaker[Session]]:
+def session_factory(
+    database_url: str, engine: Engine
+) -> Iterator[sessionmaker[Session]]:
     """Depend on engine for schema setup and table cleanup."""
     orm_engine, factory = create_engine_and_sessions(database_url)
     try:
