@@ -1,8 +1,9 @@
-"""Verify payment reservation, replay, and locking with PostgreSQL."""
+"""Verify payment reservation, charging, and finalization with PostgreSQL."""
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from threading import Barrier, Event
 from time import monotonic
@@ -12,8 +13,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from psycopg import Error as PsycopgError
-from sqlalchemy import Engine, event, func, select, text
-from sqlalchemy.engine import ExceptionContext
+from sqlalchemy import Connection, Engine, event, func, select, text
+from sqlalchemy.engine import ExceptionContext, ExecutionContext
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from tests.fakes import RecordingGateway, StubTotals
@@ -21,11 +22,15 @@ from tests.fakes import RecordingGateway, StubTotals
 from payment_service.models import Cart, Payment
 from payment_service.payment_status import PaymentStatus
 from payment_service.services.contracts import (
+    ChargeDeclined,
+    ChargeRequest,
+    ChargeResult,
     ChargeSucceeded,
     Money,
     PayCart,
     PayCartResult,
     PaymentError,
+    ProviderUnavailable,
     TotalProvider,
     TotalUnavailable,
 )
@@ -199,7 +204,7 @@ def test_total_provider_programming_error_remains_visible(
     assert_no_payment(session_factory, gateway)
 
 
-def test_reservation_is_durable_pending_snapshot(
+def test_success_persists_checkout_and_replays_without_adapters(
     session_factory: sessionmaker[Session], pay_command: PayCart
 ) -> None:
     # Deliberately differs from the cart item's USD 10 price.
@@ -210,7 +215,8 @@ def test_reservation_is_durable_pending_snapshot(
     )
     result = service.pay(pay_command)
     assert result.replayed is False
-    assert result.payment.status == PaymentStatus.PENDING
+    assert result.payment.status is PaymentStatus.SUCCEEDED
+    assert result.payment.failure_code is None
     assert result.payment.cart_id == pay_command.cart_id
     assert result.payment.payment_method_id == pay_command.payment_method_id
     assert result.payment.total == Money(Decimal("37.25"), "USD")
@@ -224,8 +230,23 @@ def test_reservation_is_durable_pending_snapshot(
         assert payment.amount == Decimal("37.25")
         assert payment.currency == "USD"
         assert payment.created_at is not None
-        assert payment.provider_reference is None
-    assert gateway.calls == []
+        assert payment.status is PaymentStatus.SUCCEEDED
+        assert payment.provider_reference == "unused"
+        assert payment.updated_at > payment.created_at
+        cart = session.get(Cart, pay_command.cart_id)
+        assert cart is not None
+        assert cart.status == "checked_out"
+        assert cart.updated_at == payment.updated_at
+    replay_service, replay_gateway = make_service(
+        session_factory, pay_command, StubTotals({})
+    )
+    replay = replay_service.pay(pay_command)
+    assert replay.payment == result.payment
+    assert replay.replayed is True
+    assert replay_gateway.calls == []
+    assert gateway.calls == [
+        ChargeRequest(result.payment.id, Money(Decimal("37.25"), "USD"), "tok_test")
+    ]
 
 
 @pytest.mark.parametrize("status", list(PaymentStatus))
@@ -270,6 +291,15 @@ def test_replay_uses_historical_snapshot(
     assert replay.payment.payment_method_id == pay_command.payment_method_id
     assert replay.payment.status == status
     assert replay.payment.total == Money(Decimal("10.00"), "USD")
+    assert (
+        replay.payment.failure_code
+        == {
+            PaymentStatus.PENDING: None,
+            PaymentStatus.SUCCEEDED: None,
+            PaymentStatus.FAILED: "card_declined",
+            PaymentStatus.UNKNOWN: "provider_unavailable",
+        }[status]
+    )
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Payment)) == 1
     assert gateway.calls == []
@@ -311,6 +341,9 @@ def test_blocking_attempt_prevents_new_key(
         payment.provider_reference = (
             "ref" if status == PaymentStatus.SUCCEEDED else None
         )
+        cart = session.get(Cart, pay_command.cart_id)
+        assert cart is not None
+        cart.status = "active"
     with pytest.raises(PaymentError) as error:
         service.pay(replace(pay_command, idempotency_key=uuid4()))
     assert error.value.code == "payment_exists"
@@ -446,7 +479,7 @@ def test_competing_carts_same_user_key_recover_from_unique_violation(
     assert len(winners) == 1
     winner = winners[0]
     assert winner.replayed is False
-    assert winner.payment.status == PaymentStatus.PENDING
+    assert winner.payment.status is PaymentStatus.SUCCEEDED
     assert (winner.payment.cart_id, winner.payment.payment_method_id) in {
         (pay_command.cart_id, pay_command.payment_method_id),
         (other_command.cart_id, other_command.payment_method_id),
@@ -457,7 +490,8 @@ def test_competing_carts_same_user_key_recover_from_unique_violation(
         assert payment is not None
         assert payment.cart_id == winner.payment.cart_id
         assert payment.payment_method_id == winner.payment.payment_method_id
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0].payment_id == winner.payment.id
 
 
 def test_same_cart_competition_returns_one_attempt(
@@ -515,7 +549,8 @@ def test_same_cart_competition_returns_one_attempt(
     assert sorted(result.replayed for result in results) == [False, True]
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Payment)) == 1
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0].payment_id == results[0].payment.id
 
 
 def test_unexpected_integrity_error_remains_visible(
@@ -524,11 +559,8 @@ def test_unexpected_integrity_error_remains_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, gateway = make_service(session_factory, pay_command)
+    gateway.result = ChargeDeclined()
     result = service.pay(pay_command)
-    with session_factory.begin() as session:
-        payment = session.get(Payment, result.payment.id)
-        assert payment is not None
-        payment.status = PaymentStatus.FAILED
     monkeypatch.setattr(
         "payment_service.services.payment_store.uuid4", lambda: result.payment.id
     )
@@ -538,7 +570,7 @@ def test_unexpected_integrity_error_remains_visible(
     assert error.value.orig.diag.constraint_name == "payments_pkey"
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Payment)) == 1
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
 def test_blocking_unique_violation_is_rechecked_in_fresh_session(
@@ -547,6 +579,7 @@ def test_blocking_unique_violation_is_rechecked_in_fresh_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, gateway = make_service(session_factory, pay_command)
+    gateway.result = ProviderUnavailable()
     service.pay(pay_command)
     real_find_blocking = PaymentStore.find_blocking
     checked_sessions: list[Session] = []
@@ -569,7 +602,7 @@ def test_blocking_unique_violation_is_rechecked_in_fresh_session(
     assert integrity_error.orig.diag.constraint_name == "uq_payments_blocking_cart"
     assert len(checked_sessions) == 2
     assert checked_sessions[0] is not checked_sessions[1]
-    assert gateway.calls == []
+    assert len(gateway.calls) == 1
 
 
 def test_store_flushes_new_payment_with_database_defaults(
@@ -583,3 +616,255 @@ def test_store_flushes_new_payment_with_database_defaults(
         assert payment.id.version == 4
         assert payment.created_at is not None
         assert payment.updated_at is not None
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "failure_code"),
+    [
+        (ChargeDeclined(), PaymentStatus.FAILED, "card_declined"),
+        (ProviderUnavailable(), PaymentStatus.UNKNOWN, "provider_unavailable"),
+    ],
+)
+def test_unsuccessful_outcomes_are_durable_and_replayed(
+    session_factory: sessionmaker[Session],
+    pay_command: PayCart,
+    outcome: ChargeResult | ProviderUnavailable,
+    status: PaymentStatus,
+    failure_code: str,
+) -> None:
+    service, gateway = make_service(session_factory, pay_command)
+    gateway.result = outcome
+    result = service.pay(pay_command)
+    assert result.replayed is False
+    assert result.payment.status is status
+    assert result.payment.failure_code == failure_code
+    with session_factory() as session:
+        payment = session.get(Payment, result.payment.id)
+        cart = session.get(Cart, pay_command.cart_id)
+        assert payment is not None and cart is not None
+        assert payment.status is status
+        assert payment.provider_reference is None
+        assert payment.updated_at > payment.created_at
+        assert cart.status == "active"
+    replay_service, replay_gateway = make_service(
+        session_factory, pay_command, StubTotals({})
+    )
+    replay = replay_service.pay(pay_command)
+    assert replay.payment == result.payment
+    assert replay.replayed is True
+    assert replay_gateway.calls == []
+    assert len(gateway.calls) == 1
+    if status is PaymentStatus.UNKNOWN:
+        with pytest.raises(PaymentError) as error:
+            service.pay(replace(pay_command, idempotency_key=uuid4()))
+        assert error.value.code == "payment_exists"
+        assert len(gateway.calls) == 1
+
+
+def test_new_key_can_succeed_after_decline_and_retains_both_attempts(
+    session_factory: sessionmaker[Session], pay_command: PayCart
+) -> None:
+    service, gateway = make_service(session_factory, pay_command)
+    gateway.result = ChargeDeclined()
+    declined = service.pay(pay_command)
+    gateway.result = ChargeSucceeded("retry-reference")
+    succeeded = service.pay(replace(pay_command, idempotency_key=uuid4()))
+    assert declined.payment.status is PaymentStatus.FAILED
+    assert succeeded.payment.status is PaymentStatus.SUCCEEDED
+    assert succeeded.payment.id != declined.payment.id
+    assert succeeded.replayed is False
+    assert [request.payment_id for request in gateway.calls] == [
+        declined.payment.id,
+        succeeded.payment.id,
+    ]
+    with session_factory() as session:
+        payments = {row.id: row for row in session.scalars(select(Payment))}
+        assert len(payments) == 2
+        assert payments[declined.payment.id].status is PaymentStatus.FAILED
+        assert payments[declined.payment.id].provider_reference is None
+        assert payments[succeeded.payment.id].status is PaymentStatus.SUCCEEDED
+        assert payments[succeeded.payment.id].provider_reference == "retry-reference"
+        assert session.scalar(select(Cart.status)) == "checked_out"
+
+
+def test_unexpected_provider_error_preserves_blocking_pending_attempt(
+    session_factory: sessionmaker[Session],
+    pay_command: PayCart,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, gateway = make_service(session_factory, pay_command)
+    failure = TypeError("Provider implementation bug")
+    calls: list[ChargeRequest] = []
+
+    def broken_charge(request: ChargeRequest) -> ChargeResult:
+        calls.append(request)
+        raise failure
+
+    monkeypatch.setattr(gateway, "charge", broken_charge)
+    with pytest.raises(TypeError) as error:
+        service.pay(pay_command)
+    assert error.value is failure
+    assert len(calls) == 1
+    with session_factory() as session:
+        payment = session.scalars(select(Payment)).one()
+        assert payment.id == calls[0].payment_id
+        assert payment.status is PaymentStatus.PENDING
+        assert payment.provider_reference is None
+        assert session.scalar(select(Cart.status)) == "active"
+    replay = service.pay(pay_command)
+    assert replay.replayed is True
+    assert replay.payment.status is PaymentStatus.PENDING
+    with pytest.raises(PaymentError) as conflict:
+        service.pay(replace(pay_command, idempotency_key=uuid4()))
+    assert conflict.value.code == "payment_exists"
+    assert len(calls) == 1
+
+
+def test_charge_runs_after_reservation_closes_and_finalization_locks_in_order(
+    session_factory: sessionmaker[Session],
+    engine: Engine,
+    pay_command: PayCart,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed_sessions: list[Session] = []
+    lock_sessions: list[Session] = []
+    lock_tables: list[str] = []
+    real_close = Session.close
+    real_lock_cart = PaymentStore.lock_cart
+
+    def record_close(session: Session) -> None:
+        real_close(session)
+        closed_sessions.append(session)
+
+    def record_cart_lock(
+        self: PaymentStore, session: Session, cart_id: UUID, user_id: UUID
+    ) -> Cart | None:
+        lock_sessions.append(session)
+        return real_lock_cart(self, session, cart_id, user_id)
+
+    def record_row_lock(
+        connection: Connection,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: ExecutionContext,
+        executemany: bool,
+    ) -> None:
+        if "FOR UPDATE" in statement:
+            lock_tables.append("cart" if "FROM carts" in statement else "payment")
+
+    service, gateway = make_service(session_factory, pay_command)
+    real_charge = gateway.charge
+
+    def inspect_reservation(request: ChargeRequest) -> ChargeResult:
+        assert len(lock_sessions) == 1
+        assert closed_sessions == lock_sessions
+        assert not lock_sessions[0].in_transaction()
+        with engine.begin() as connection:
+            stored = connection.execute(
+                text("SELECT status, amount, currency FROM payments WHERE id = :id"),
+                {"id": request.payment_id},
+            ).one()
+            assert tuple(stored) == ("pending", Decimal("10.00"), "USD")
+            assert (
+                connection.execute(
+                    text("SELECT status FROM carts WHERE id = :id FOR UPDATE NOWAIT"),
+                    {"id": pay_command.cart_id},
+                ).scalar_one()
+                == "active"
+            )
+        return real_charge(request)
+
+    monkeypatch.setattr(Session, "close", record_close)
+    monkeypatch.setattr(PaymentStore, "lock_cart", record_cart_lock)
+    monkeypatch.setattr(gateway, "charge", inspect_reservation)
+    orm_engine = session_factory.kw["bind"]
+    event.listen(orm_engine, "before_cursor_execute", record_row_lock)
+    try:
+        result = service.pay(pay_command)
+    finally:
+        event.remove(orm_engine, "before_cursor_execute", record_row_lock)
+    assert result.payment.status is PaymentStatus.SUCCEEDED
+    assert len(lock_sessions) == 2
+    assert lock_sessions[0] is not lock_sessions[1]
+    assert closed_sessions == lock_sessions
+    assert lock_tables == ["cart", "cart", "payment"]
+    assert len(gateway.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "changed_status", [PaymentStatus.FAILED, PaymentStatus.UNKNOWN]
+)
+def test_finalization_rejects_nonpending_payment_without_overwriting(
+    session_factory: sessionmaker[Session],
+    pay_command: PayCart,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_status: PaymentStatus,
+) -> None:
+    service, gateway = make_service(session_factory, pay_command)
+    changed_at = datetime(2020, 1, 1, tzinfo=UTC)
+    real_charge = gateway.charge
+
+    def charge_after_another_writer(request: ChargeRequest) -> ChargeResult:
+        with session_factory.begin() as session:
+            payment = session.get(Payment, request.payment_id)
+            assert payment is not None
+            payment.status = changed_status
+            payment.updated_at = changed_at
+        return real_charge(request)
+
+    monkeypatch.setattr(gateway, "charge", charge_after_another_writer)
+    with pytest.raises(RuntimeError):
+        service.pay(pay_command)
+    with session_factory() as session:
+        payment = session.scalars(select(Payment)).one()
+        assert payment.status is changed_status
+        assert payment.updated_at == changed_at
+        assert payment.provider_reference is None
+        assert session.scalar(select(Cart.status)) == "active"
+    assert len(gateway.calls) == 1
+    replay = service.pay(pay_command)
+    assert replay.replayed is True
+    assert replay.payment.status is changed_status
+    assert len(gateway.calls) == 1
+
+
+def test_failed_final_commit_rolls_back_payment_and_cart_together(
+    session_factory: sessionmaker[Session], pay_command: PayCart
+) -> None:
+    service, gateway = make_service(session_factory, pay_command)
+    failure = RuntimeError("Final commit failed")
+    commit_count = 0
+
+    def fail_final_commit(connection: Connection) -> None:
+        nonlocal commit_count
+        commit_count += 1
+        if commit_count == 2:
+            # Both updates reached PostgreSQL in B, but neither may survive rollback.
+            assert connection.scalar(select(Payment.status)) is PaymentStatus.SUCCEEDED
+            assert connection.scalar(select(Cart.status)) == "checked_out"
+            raise failure
+
+    orm_engine = session_factory.kw["bind"]
+    event.listen(orm_engine, "commit", fail_final_commit)
+    try:
+        with pytest.raises(RuntimeError) as error:
+            service.pay(pay_command)
+        assert error.value is failure
+    finally:
+        event.remove(orm_engine, "commit", fail_final_commit)
+    assert commit_count == 2
+    assert len(gateway.calls) == 1
+    with session_factory() as session:
+        payment = session.scalars(select(Payment)).one()
+        assert payment.status is PaymentStatus.PENDING
+        assert payment.provider_reference is None
+        assert payment.updated_at == payment.created_at
+        assert session.scalar(select(Cart.status)) == "active"
+    replay_service, replay_gateway = make_service(
+        session_factory, pay_command, StubTotals({})
+    )
+    replay = replay_service.pay(pay_command)
+    assert replay.replayed is True
+    assert replay.payment.status is PaymentStatus.PENDING
+    assert replay_gateway.calls == []

@@ -1,5 +1,6 @@
-"""Payment reservation and replay."""
+"""Payment reservation, charging, finalization, and replay."""
 
+from datetime import UTC, datetime
 from uuid import UUID
 
 from psycopg.errors import UniqueViolation
@@ -7,14 +8,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from payment_service.models import Payment
+from payment_service.payment_status import PaymentStatus
 from payment_service.services.contracts import (
     ChargeRequest,
+    ChargeResult,
+    ChargeSucceeded,
     Money,
     PayCart,
     PayCartResult,
     PaymentError,
     PaymentGateway,
     PaymentView,
+    ProviderUnavailable,
     TotalProvider,
     TotalUnavailable,
 )
@@ -55,7 +60,9 @@ class PaymentService:
         self._store = PaymentStore()
 
     def pay(self, command: PayCart) -> PayCartResult:
-        """Reserve a payment attempt or replay a matching attempt.
+        """Charge a reserved payment and persist its outcome, or replay it.
+
+        Unexpected provider errors leave the reserved attempt pending.
 
         Raises:
             PaymentError: The request is ineligible or conflicts with a payment.
@@ -64,11 +71,40 @@ class PaymentService:
         reservation = self._reserve(command)
         if isinstance(reservation, PayCartResult):
             return reservation
-        with self._session_factory() as session:
-            payment = session.get(Payment, reservation.payment_id)
-            if payment is None:
-                raise RuntimeError("Reserved payment disappeared")
-            return PayCartResult(_payment_view(payment), replayed=False)
+        try:
+            outcome = self._gateway.charge(reservation)
+        except ProviderUnavailable as error:
+            return self._finalize(command, reservation.payment_id, error)
+        return self._finalize(command, reservation.payment_id, outcome)
+
+    def _finalize(
+        self,
+        command: PayCart,
+        payment_id: UUID,
+        outcome: ChargeResult | ProviderUnavailable,
+    ) -> PayCartResult:
+        """Persist an outcome and any checkout together before returning it."""
+        with self._session_factory.begin() as session:
+            cart = self._store.lock_cart(session, command.cart_id, command.user_id)
+            if cart is None:
+                raise RuntimeError("Reserved cart disappeared")
+            payment = self._store.lock_payment(session, payment_id)
+            if payment.status is not PaymentStatus.PENDING:
+                raise RuntimeError("Reserved payment is no longer pending")
+            payment.updated_at = datetime.now(UTC)
+            if isinstance(outcome, ChargeSucceeded):
+                payment.status = PaymentStatus.SUCCEEDED
+                payment.provider_reference = outcome.provider_reference
+                cart.status = "checked_out"
+                cart.updated_at = payment.updated_at
+            else:
+                payment.status = (
+                    PaymentStatus.UNKNOWN
+                    if isinstance(outcome, ProviderUnavailable)
+                    else PaymentStatus.FAILED
+                )
+            view = _payment_view(payment)
+        return PayCartResult(view, replayed=False)
 
     def _reserve(self, command: PayCart) -> PayCartResult | ChargeRequest:
         """Return an existing payment result or reserve a new attempt."""

@@ -1,4 +1,4 @@
-"""Database operations for payment reservation."""
+"""Database operations for payment reservation and finalization."""
 
 from uuid import UUID, uuid4
 
@@ -33,6 +33,12 @@ class PaymentStore:
                 Payment.user_id == user_id, Payment.idempotency_key == idempotency_key
             )
         )
+
+    def lock_payment(self, session: Session, payment_id: UUID) -> Payment:
+        """Lock a reserved payment for finalization."""
+        return session.scalars(
+            select(Payment).where(Payment.id == payment_id).with_for_update()
+        ).one()
 
     def has_items(self, session: Session, cart_id: UUID) -> bool:
         return bool(session.scalar(select(exists().where(CartItem.cart_id == cart_id))))
