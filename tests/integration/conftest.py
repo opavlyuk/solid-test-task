@@ -106,15 +106,8 @@ def shop(engine: Engine) -> dict[str, UUID]:
 
 
 @pytest.fixture
-def endpoint_app(
-    database_url: str, engine: Engine, shop: dict[str, UUID]
-) -> Iterator[APIFlask]:
-    """Populate the test cart and yield an API with demo authentication enabled.
-
-    Inserts a product and cart item into the isolated test database. Supplies
-    a fixed USD 70.00 total and a gateway that records successful charges.
-    Disposes the application's database engine after the test.
-    """
+def populated_cart(engine: Engine, shop: dict[str, UUID]) -> dict[str, UUID]:
+    """Add a product and item to the test cart and return the shop IDs."""
     with engine.begin() as connection:
         product_id = uuid4()
         connection.execute(
@@ -128,9 +121,20 @@ def endpoint_app(
             ),
             {"cart_id": shop["cart_id"], "product_id": product_id},
         )
+    return shop
+
+
+@pytest.fixture
+def endpoint_app(
+    database_url: str, populated_cart: dict[str, UUID]
+) -> Iterator[APIFlask]:
+    """Yield a demo API with a USD 70.00 total and a recording success gateway.
+
+    Disposes the application's database engine after the test.
+    """
     app = create_app(
         {"DATABASE_URL": database_url, "ALLOW_DEMO_AUTH": True},
-        totals=StubTotals({shop["cart_id"]: Money(Decimal("70.00"), "USD")}),
+        totals=StubTotals({populated_cart["cart_id"]: Money(Decimal("70.00"), "USD")}),
         gateway=RecordingGateway(ChargeSucceeded("secret_reference")),
     )
     yield app

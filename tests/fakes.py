@@ -1,3 +1,4 @@
+from threading import Lock
 from uuid import UUID
 
 from payment_service.services.contracts import (
@@ -25,9 +26,11 @@ class RecordingGateway:
     def __init__(self, result: ChargeResult | ProviderUnavailable) -> None:
         self.calls: list[ChargeRequest] = []
         self.result = result
+        self._lock = Lock()
 
     def charge(self, request: ChargeRequest) -> ChargeResult:
-        self.calls.append(request)
+        with self._lock:
+            self.calls.append(request)
         if isinstance(self.result, ProviderUnavailable):
             raise self.result
         return self.result
