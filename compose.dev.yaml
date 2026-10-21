@@ -3,7 +3,7 @@ name: solid-test-task
 x-app: &app
   build: .
   image: solid-test-task-app
-  environment:
+  environment: &app-environment
     DATABASE_URL: postgresql+psycopg://
     PGHOST: db
     PGPORT: "5432"
@@ -15,11 +15,25 @@ services:
   app:
     <<: *app
     init: true
-    # Keep the development environment available until an HTTP entry point exists.
-    command: ["sleep", "infinity"]
+    environment:
+      <<: *app-environment
+      # This loopback-only demo accepts an unverified local identity header.
+      ALLOW_DEMO_AUTH: "true"
+    ports:
+      - "127.0.0.1:8000:8000"
     depends_on:
       db-init:
         condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3).close()"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   db-init:
     <<: *app

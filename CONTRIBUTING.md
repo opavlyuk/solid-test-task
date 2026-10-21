@@ -37,6 +37,11 @@ services. Inside the app and initialization containers, `PGHOST=db` and
 Host commands load `.env` explicitly using `uv run --env-file .env`.
 Exported shell variables take precedence over values in `.env`.
 
+`ALLOW_DEMO_AUTH=true` in the example enables the unverified `X-User-ID` header
+for local host runs. The application defaults to disabled when it is absent.
+The local Compose file explicitly enables it only for `app`; it is not an
+authentication mechanism for deployment.
+
 ## Local deployment with Docker Compose
 
 The root `compose.dev.yaml` defines the local development environment. Run the
@@ -51,8 +56,10 @@ docker compose -f compose.dev.yaml ps
 
 Compose waits for PostgreSQL's health check, then runs the one-shot `db-init`
 service to apply Alembic migrations and load development data. `app` starts only
-when initialization succeeds. The HTTP service is still a scaffold, so `app`
-stays idle for development commands and does not serve HTTP yet.
+when initialization succeeds. The Flask development server serves the API at
+`http://127.0.0.1:8000`, with interactive documentation at `/docs` and its schema
+at `/openapi.json`. The HTTP health check requests that schema and does not test
+database or provider connectivity. This server is for local review only.
 Source files are copied into the image; rerun
 `docker compose -f compose.dev.yaml up --build --force-recreate --wait` after changing code,
 dependencies, or migrations. This also resets the local database.
@@ -64,13 +71,13 @@ docker compose -f compose.dev.yaml exec app alembic upgrade head
 docker compose -f compose.dev.yaml exec app alembic current
 docker compose -f compose.dev.yaml exec app ruff check .
 docker compose -f compose.dev.yaml exec app ty check
-docker compose -f compose.dev.yaml exec app pytest
+docker compose -f compose.dev.yaml exec app pytest tests/unit -q
 docker compose -f compose.dev.yaml exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-There are currently no tests, so pytest reports no tests collected (exit code 5).
-Generate migration revisions on the host using the commands below, then rebuild
-the image to include them.
+Run integration tests on the host against the separate test database described
+under Verification. Generate migration revisions on the host using the commands
+below, then rebuild the image to include them.
 
 With the example settings, the database is available to host tools at
 `127.0.0.1:5433`, using database and user `payment_service` and password
@@ -133,7 +140,7 @@ uv run --env-file .env --no-sync --offline python scripts/seed_dev_db.py
 
 Schema changes belong in Alembic revisions; development data belongs in this
 script. The original `docs/requirements/quick-start-schema.sql` stays unchanged
-as a reference. Payment tables will be introduced in a separate migration.
+as a reference. Revision `0002` introduces the payment table and its constraints.
 
 ## GitHub flow
 
@@ -236,21 +243,44 @@ through the same Ruff pre-commit hooks as every other Python file.
 Use `.env` for local connection settings. A full `DATABASE_URL` with the psycopg
 driver is also supported when connecting to a separately configured database.
 
+Use a models-first workflow. Start the disposable test database and export
+`TEST_DATABASE_URL` as shown under Verification, then bring it to the existing
+head before changing models:
+
 ```bash
-uv run --env-file .env --no-sync --offline alembic revision -m "add payments table"
-# Edit the generated revision's upgrade() and downgrade() functions.
-uv run --env-file .env --no-sync --offline alembic upgrade head
-uv run --env-file .env --no-sync --offline alembic current
+DATABASE_URL="$TEST_DATABASE_URL" uv run --no-sync --offline alembic upgrade head
+# Edit the SQLAlchemy models in src/payment_service/models/ first.
+DATABASE_URL="$TEST_DATABASE_URL" uv run --no-sync --offline alembic revision --autogenerate -m "describe schema change"
 ```
 
-Review and test migrations against a disposable PostgreSQL database before
-merging. Commit revision files with the corresponding model changes.
+Inspect the generated candidate's `upgrade()` and `downgrade()` before applying
+it. Confirm types, defaults, constraints, indexes, data preservation, and the
+scope of any drops. Autogeneration needs review, especially for check constraints
+and renames; add any required operations it misses. Keep revisions self-contained
+without importing application models. Use Alembic's generated revision IDs for
+future changes; the explicit `0002` ID was specific to the payment migration.
+
+Apply the reviewed candidate, update schema tests for the intended change, then
+check both behavior and metadata alignment:
+
+```bash
+DATABASE_URL="$TEST_DATABASE_URL" uv run --no-sync --offline alembic upgrade head
+DATABASE_URL="$TEST_DATABASE_URL" uv run --no-sync --offline alembic current
+uv run --no-sync --offline pytest tests/integration/test_payment_schema.py -q
+DATABASE_URL="$TEST_DATABASE_URL" uv run --no-sync --offline alembic check
+```
+
+Review and test upgrades and downgrades on this disposable database before
+merging. `alembic check` detects supported metadata drift but does not replace
+constraint and migration tests. Commit revisions with their model and test
+changes, then rebuild the development image to include them.
 
 Revision `0001` creates the supplied shop schema without sample data. Revisions
 are self-contained and do not import application models. Downgrading `0001`
 removes its tables but retains `pgcrypto`, which may be used by other schemas.
-Autogeneration requires wiring the SQLAlchemy metadata into `migrations/env.py`
-once models are added.
+Revision `0002` adds payment attempts; its downgrade drops only the payment
+table, including its indexes. `migrations/env.py` already uses `Base.metadata`
+from the application's model package for autogeneration.
 
 ## Pre-commit hooks
 
@@ -279,7 +309,7 @@ If a hook fixes files, review and stage the changes, then commit again. Empty
 files remain empty. Private-key detection is a basic check, not a general
 credential scanner.
 
-Run pytest separately before merging once tests are added. Docker builds and
+Run pytest separately before merging. Docker builds and
 database operations also stay outside the commit hook.
 
 ## Verification
@@ -290,7 +320,7 @@ After `uv sync --locked`, run the installed tools:
 uv run --no-sync --offline ruff check .
 uv run --no-sync --offline ruff format --check .
 uv run --no-sync --offline ty check
-uv run --no-sync --offline pytest
+uv run --no-sync --offline pytest tests/unit -q
 ```
 
 Ruff handles linting and formatting; ty handles type checking. Format only the
@@ -298,8 +328,25 @@ files you intend to change with `uv run --no-sync --offline ruff format <paths>`
 
 Unit tests belong in `tests/unit/`; tests requiring PostgreSQL or other external
 services belong in `tests/integration/` and should use the `integration` marker.
-Prepare those services before running integration tests. The uv `--offline`
-flag prevents uv downloads; it does not prevent tests from using the network.
+The integration fixtures apply migrations and truncate application tables before
+and after each test. They require `TEST_DATABASE_URL` to name a PostgreSQL
+database ending in `_test`, and fail if it is absent. Use the dedicated temporary
+database, not the seeded development database or any data you need to retain:
+
+```bash
+docker compose -f compose.test.yaml up -d --wait
+export TEST_DATABASE_URL='postgresql+psycopg://payment_service_test:local_test_password@127.0.0.1:55433/payment_service_test'
+uv run --no-sync --offline pytest tests/integration -q
+uv run --no-sync --offline pytest -q
+DATABASE_URL="$TEST_DATABASE_URL" uv run --no-sync --offline alembic check
+```
+
+The test stack has its own Compose project and publishes PostgreSQL on loopback
+port `55433`, separate from the development database's default `5433`. Its data
+is also temporary. Run `docker compose -f compose.test.yaml down` when finished.
+The uv `--offline` flag prevents uv downloads; it does not prevent tests from
+using the network. See the README for manual success, replay, decline, and
+timeout examples.
 
 For packaging or Docker changes, also run:
 

@@ -20,5 +20,5 @@ COPY migrations/ ./migrations/
 COPY scripts/ ./scripts/
 RUN uv sync --locked
 
-# Development scaffold; add a service entry point when implementing the endpoint.
-CMD ["python", "--version"]
+# Flask's development server is for local review only.
+CMD ["flask", "--app", "payment_service:create_app", "run", "--host=0.0.0.0", "--port=8000"]
