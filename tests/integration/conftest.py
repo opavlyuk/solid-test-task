@@ -1,16 +1,22 @@
 import os
 from collections.abc import Iterator
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from apiflask import APIFlask
+from flask.testing import FlaskClient
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
+from tests.fakes import RecordingGateway, StubTotals
 
+from payment_service import create_app
 from payment_service.db import create_engine_and_sessions
+from payment_service.services.contracts import ChargeSucceeded, Money
 
 
 @pytest.fixture(scope="session")
@@ -97,3 +103,40 @@ def shop(engine: Engine) -> dict[str, UUID]:
             ids,
         )
     return ids
+
+
+@pytest.fixture
+def endpoint_app(
+    database_url: str, engine: Engine, shop: dict[str, UUID]
+) -> Iterator[APIFlask]:
+    """Populate the test cart and yield an API with demo authentication enabled.
+
+    Inserts a product and cart item into the isolated test database. Supplies
+    a fixed USD 70.00 total and a gateway that records successful charges.
+    Disposes the application's database engine after the test.
+    """
+    with engine.begin() as connection:
+        product_id = uuid4()
+        connection.execute(
+            text("INSERT INTO products (id, name, price) VALUES (:id, 'P', 10)"),
+            {"id": product_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO cart_items (cart_id, product_id, quantity, unit_price) "
+                "VALUES (:cart_id, :product_id, 1, 10)"
+            ),
+            {"cart_id": shop["cart_id"], "product_id": product_id},
+        )
+    app = create_app(
+        {"DATABASE_URL": database_url, "ALLOW_DEMO_AUTH": True},
+        totals=StubTotals({shop["cart_id"]: Money(Decimal("70.00"), "USD")}),
+        gateway=RecordingGateway(ChargeSucceeded("secret_reference")),
+    )
+    yield app
+    app.extensions["engine"].dispose()
+
+
+@pytest.fixture
+def client(endpoint_app: APIFlask) -> FlaskClient:
+    return endpoint_app.test_client()
