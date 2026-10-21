@@ -134,11 +134,18 @@ to a user and identifies the cart and payment method; changing either with the
 same key returns `409`. A new key cannot pay an already checked-out cart.
 Always reuse the original key after an interrupted request.
 
-Inspect the stored attempt and cart:
+Inspect the stored attempt and cart when using Docker:
 
 ```bash
 docker compose -f compose.dev.yaml exec db sh -c \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT id, cart_id, amount, currency, status FROM payments; SELECT id, status FROM carts;"'
+```
+
+For a native PostgreSQL setup, load the connection settings from `.env`:
+
+```bash
+uv run --env-file .env --no-sync --offline psql -v ON_ERROR_STOP=1 \
+  -c 'SELECT id, cart_id, amount, currency, status FROM payments; SELECT id, status FROM carts;'
 ```
 
 The body accepts only `payment_method_id` (a UUID). Identity and idempotency key
@@ -160,7 +167,7 @@ resources both produce `404`.
 | `409` | Inactive/empty cart, blocking payment, or conflicting key reuse |
 | `415` | Body is not sent as JSON |
 | `422` | Invalid UUID, missing required input, or unexpected body field |
-| `500` | Unexpected application error |
+| `500` | Unexpected application error, including database constraint/data errors |
 | `503` | Total unavailable or database unavailable |
 
 Payment responses (`200`, `201`, `202`, `402`) use the shape above. Other errors

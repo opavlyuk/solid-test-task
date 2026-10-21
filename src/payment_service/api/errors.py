@@ -7,8 +7,10 @@ from apiflask import APIFlask, HTTPError
 from apiflask.types import ResponseHeaderType
 from flask import request
 from sqlalchemy.exc import (
+    DataError,
     DBAPIError,
     DisconnectionError,
+    IntegrityError,
     ProgrammingError,
     TimeoutError,
 )
@@ -75,7 +77,7 @@ def register_errors(app: APIFlask) -> None:
         app.logger.error(
             "Payment request failed: type=%s cart_id=%s", type(error).__name__, cart_id
         )
-        if isinstance(error, ProgrammingError):
+        if isinstance(error, (ProgrammingError, IntegrityError, DataError)):
             return error_body("internal_error"), HTTPStatus.INTERNAL_SERVER_ERROR
         if isinstance(error, (DBAPIError, TimeoutError, DisconnectionError)):
             return error_body("service_unavailable"), HTTPStatus.SERVICE_UNAVAILABLE

@@ -393,7 +393,14 @@ def test_falsey_collaborators(
 
 
 @pytest.mark.parametrize(
-    "error_type", ["InvalidRequestError", "CompileError", "ProgrammingError"]
+    "error_type",
+    [
+        "InvalidRequestError",
+        "CompileError",
+        "ProgrammingError",
+        "IntegrityError",
+        "DataError",
+    ],
 )
 def test_database_programming_errors_are_internal(
     endpoint_app: APIFlask,
@@ -408,7 +415,7 @@ def test_database_programming_errors_are_internal(
     error_class = getattr(exc, error_type)
     error = (
         error_class("secret", {}, RuntimeError("secret"))
-        if error_type == "ProgrammingError"
+        if issubclass(error_class, exc.DBAPIError)
         else error_class("secret")
     )
 
@@ -478,7 +485,9 @@ def test_conflicts(
     assert body["error"]["message"]
 
 
-@pytest.mark.parametrize("error_type", ["DBAPIError", "IntegrityError", "DataError"])
+@pytest.mark.parametrize(
+    "error_type", ["DBAPIError", "OperationalError", "InterfaceError"]
+)
 def test_database_transaction_errors_are_unavailable(
     endpoint_app: APIFlask,
     client: FlaskClient,
