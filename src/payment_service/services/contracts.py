@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from payment_service.payment_status import PaymentStatus
@@ -82,9 +82,19 @@ class ProviderUnavailable(Exception):
     pass
 
 
+type PaymentErrorCode = Literal[
+    "unauthorized",
+    "not_found",
+    "cart_not_active",
+    "empty_cart",
+    "payment_exists",
+    "idempotency_conflict",
+]
+
+
 class PaymentError(Exception):
-    def __init__(self, code: str) -> None:
-        self.code = code
+    def __init__(self, code: PaymentErrorCode) -> None:
+        self.code: PaymentErrorCode = code
         super().__init__(code)
 
 

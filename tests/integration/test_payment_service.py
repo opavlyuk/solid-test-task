@@ -720,6 +720,41 @@ def test_unexpected_provider_error_preserves_blocking_pending_attempt(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("outcome", [None, {"status": "declined", "token": "secret"}])
+def test_malformed_gateway_result_preserves_blocking_pending_attempt(
+    session_factory: sessionmaker[Session],
+    pay_command: PayCart,
+    outcome: object,
+) -> None:
+    service, gateway = make_service(session_factory, pay_command)
+    # Deliberately violate the adapter contract to exercise the runtime boundary.
+    gateway.result = cast(ChargeResult, outcome)
+
+    with pytest.raises(TypeError) as error:
+        service.pay(pay_command)
+    assert "secret" not in str(error.value)
+    with session_factory() as session:
+        payment = session.scalars(select(Payment)).one()
+        payment_id = payment.id
+        assert payment.status is PaymentStatus.PENDING
+        assert payment.provider_reference is None
+        assert payment.updated_at == payment.created_at
+        assert session.scalar(select(Cart.status)) == "active"
+
+    gateway.result = ChargeSucceeded("must-not-charge-again")
+    replay = service.pay(pay_command)
+    assert replay.replayed is True
+    assert replay.payment.id == payment_id
+    assert replay.payment.status is PaymentStatus.PENDING
+    with pytest.raises(PaymentError) as conflict:
+        service.pay(replace(pay_command, idempotency_key=uuid4()))
+    assert conflict.value.code == "payment_exists"
+    assert len(gateway.calls) == 1
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(Payment)) == 1
+        assert session.scalar(select(Cart.status)) == "active"
+
+
 def test_charge_runs_after_reservation_closes_and_finalization_locks_in_order(
     session_factory: sessionmaker[Session],
     engine: Engine,

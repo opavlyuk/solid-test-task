@@ -266,6 +266,16 @@ change the cart to `checked_out` atomically. Replays return the stored attempt
 without contacting the provider. Money uses Decimal internally and a two-decimal
 string in JSON.
 
+The application service deliberately depends on SQLAlchemy sessions, ORM models,
+and PostgreSQL conflict handling. The focused `PaymentStore` keeps queries
+together, while transaction ownership stays in `PaymentService`. This is a
+small layered design; the use case is not independent of the persistence
+framework. Its orchestration tests therefore use real PostgreSQL. Totals and
+payment processing use injected integration contracts. A future requirement for
+persistence-independent orchestration would need an application-owned transaction
+and store contract, with database error translation inside its implementation;
+injecting the current store alone would not provide that separation.
+
 ## Assumptions and recovery limits
 
 - The demo total provider returns a fixed USD 70.00 only for the seeded cart.
@@ -277,9 +287,9 @@ string in JSON.
   unresolved attempts.
 - A decline is definitive. A provider timeout is uncertain and is stored as
   `unknown`; the service does not assume that no charge occurred.
-- A crash after reservation, unexpected provider exception, or failed outcome
-  commit can leave `pending`. A lost database commit acknowledgment can return
-  an error even though a write persisted. Repeating the same key reads durable
+- A crash after reservation, unexpected provider exception or malformed result,
+  or failed outcome commit can leave `pending`. A lost commit acknowledgment can
+  return an error even though a write persisted. Repeating the same key reads durable
   state without charging again. An unsuccessful reservation commit may leave no
   attempt; its retry can then reserve normally.
 - There is no reconciliation worker, webhook, automatic retry, or recovery

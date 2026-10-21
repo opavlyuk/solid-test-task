@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from payment_service.models import Payment
 from payment_service.payment_status import PaymentStatus
 from payment_service.services.contracts import (
+    ChargeDeclined,
     ChargeRequest,
     ChargeResult,
     ChargeSucceeded,
@@ -62,7 +63,7 @@ class PaymentService:
     def pay(self, command: PayCart) -> PayCartResult:
         """Charge a reserved payment and persist its outcome, or replay it.
 
-        Unexpected provider errors leave the reserved attempt pending.
+        Unexpected provider errors or malformed results leave the attempt pending.
 
         Raises:
             PaymentError: The request is ineligible or conflicts with a payment.
@@ -97,12 +98,12 @@ class PaymentService:
                 payment.provider_reference = outcome.provider_reference
                 cart.status = "checked_out"
                 cart.updated_at = payment.updated_at
+            elif isinstance(outcome, ChargeDeclined):
+                payment.status = PaymentStatus.FAILED
+            elif isinstance(outcome, ProviderUnavailable):
+                payment.status = PaymentStatus.UNKNOWN
             else:
-                payment.status = (
-                    PaymentStatus.UNKNOWN
-                    if isinstance(outcome, ProviderUnavailable)
-                    else PaymentStatus.FAILED
-                )
+                raise TypeError("Unexpected payment gateway result")
             view = _payment_view(payment)
         return PayCartResult(view, replayed=False)
 

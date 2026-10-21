@@ -1,9 +1,34 @@
 from http import HTTPStatus
+from typing import get_args
 from uuid import uuid4
 
 import pytest
+from apiflask import APIFlask
 
 from payment_service import create_app
+from payment_service.api.errors import register_errors
+from payment_service.services.contracts import PaymentError, PaymentErrorCode
+
+
+@pytest.mark.parametrize("code", get_args(PaymentErrorCode.__value__))
+def test_every_business_error_has_an_http_response(code: PaymentErrorCode) -> None:
+    app = APIFlask(__name__)
+    register_errors(app)
+
+    @app.get("/failure")
+    def fail() -> None:
+        raise PaymentError(code)
+
+    response = app.test_client().get("/failure")
+    expected_status = {
+        "unauthorized": HTTPStatus.UNAUTHORIZED,
+        "not_found": HTTPStatus.NOT_FOUND,
+    }.get(code, HTTPStatus.CONFLICT)
+    assert response.status_code == expected_status
+    body = response.get_json()
+    assert body["error"]["code"] == code
+    assert isinstance(body["error"]["message"], str)
+    assert body["error"]["message"]
 
 
 @pytest.mark.parametrize("value", ["perhaps", 2, None, "", [], {}])
