@@ -1,4 +1,4 @@
-"""Create the existing shop schema supplied with the task."""
+"""Create the shop schema."""
 
 import sqlalchemy as sa
 from alembic import op

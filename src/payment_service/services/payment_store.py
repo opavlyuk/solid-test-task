@@ -11,13 +11,13 @@ from payment_service.services.contracts import Money, PayCart
 
 
 class PaymentStore:
-    """Query and flush payment rows within caller-owned transactions."""
+    """Payment persistence within caller-owned transactions."""
 
     def user_exists(self, session: Session, user_id: UUID) -> bool:
         return bool(session.scalar(select(exists().where(User.id == user_id))))
 
     def lock_cart(self, session: Session, cart_id: UUID, user_id: UUID) -> Cart | None:
-        """Lock the user's cart until transaction end; return None if inaccessible."""
+        """Lock the user's cart or return None if inaccessible."""
         return session.scalar(
             select(Cart)
             .where(Cart.id == cart_id, Cart.user_id == user_id)
@@ -27,7 +27,7 @@ class PaymentStore:
     def find_by_key(
         self, session: Session, user_id: UUID, idempotency_key: UUID
     ) -> Payment | None:
-        """Find a stored attempt by the user's idempotency key, in any status."""
+        """Find a payment attempt by the user's idempotency key."""
         return session.scalar(
             select(Payment).where(
                 Payment.user_id == user_id, Payment.idempotency_key == idempotency_key
@@ -40,7 +40,7 @@ class PaymentStore:
     def get_method(
         self, session: Session, payment_method_id: UUID, user_id: UUID
     ) -> UserPaymentMethod | None:
-        """Return the saved method only if it belongs to the user."""
+        """Find a payment method belonging to the user."""
         return session.scalar(
             select(UserPaymentMethod).where(
                 UserPaymentMethod.id == payment_method_id,
@@ -49,7 +49,7 @@ class PaymentStore:
         )
 
     def find_blocking(self, session: Session, cart_id: UUID) -> Payment | None:
-        """Find a pending, unknown, or successful attempt that blocks another charge."""
+        """Find a payment attempt that prevents another charge."""
         return session.scalar(
             select(Payment).where(
                 Payment.cart_id == cart_id,
@@ -66,7 +66,7 @@ class PaymentStore:
     def insert_pending(
         self, session: Session, command: PayCart, total: Money
     ) -> Payment:
-        """Flush a new pending attempt with database defaults, without committing."""
+        """Create a pending payment attempt."""
         payment = Payment(
             id=uuid4(),
             user_id=command.user_id,

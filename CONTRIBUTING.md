@@ -208,6 +208,22 @@ Keep each commit focused on one logical change. Include `pyproject.toml` and
 `uv.lock` together when changing dependencies. Never commit local environments,
 credentials, or editor settings.
 
+## Docstrings
+
+Follow the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings)
+and [Napoleon's Google-style examples](https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html).
+
+- Describe purpose and caller-facing behavior, not implementation details.
+- Keep wording concise. Avoid semicolons, redundant words, and restating names
+  or type annotations.
+- Use triple double quotes and a one-line summary ending in a period.
+  Keep docstring lines within 80 characters.
+- Prefer a one-line docstring when it suffices. Otherwise, leave a blank line
+  after the summary and use `Args:`, `Returns:`, `Yields:`, or `Raises:` as needed,
+  with four-space section indentation.
+- Document meaningful constraints, side effects, and exceptions. Omit boilerplate
+  for obvious helpers.
+
 ## Database migrations
 
 Use [Alembic](https://alembic.sqlalchemy.org/en/latest/tutorial.html) for database

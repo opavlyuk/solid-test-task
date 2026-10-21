@@ -1,4 +1,4 @@
-"""Load the supplied sample data into a migrated local development database."""
+"""Populate the development database with sample shop data."""
 
 import os
 from decimal import Decimal

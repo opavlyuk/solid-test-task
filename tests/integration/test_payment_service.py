@@ -1,4 +1,4 @@
-"""Exercise payment reservation, replay, and locking against PostgreSQL."""
+"""Verify payment reservation, replay, and locking with PostgreSQL."""
 
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -39,7 +39,7 @@ pytestmark = pytest.mark.integration
 def violated_constraints(
     session_factory: sessionmaker[Session],
 ) -> Iterator[list[str | None]]:
-    """Record real database violations and always remove the listener afterward."""
+    """Capture violated database constraints during a test."""
     constraints: list[str | None] = []
 
     def record_constraint_error(context: ExceptionContext) -> None:
@@ -57,7 +57,7 @@ def violated_constraints(
 
 @pytest.fixture
 def pay_command(engine: Engine, shop: dict[str, UUID]) -> PayCart:
-    """Add an item to the fixture cart and return a valid payment command."""
+    """Prepare a payment command for a nonempty cart."""
     with engine.begin() as connection:
         connection.execute(
             text("INSERT INTO products (id, name, price) VALUES (:id, 'P', 10)"),
@@ -78,7 +78,7 @@ def make_service(
     command: PayCart,
     total_provider: TotalProvider | None = None,
 ) -> tuple[PaymentService, RecordingGateway]:
-    """Build a service with a recording gateway and a default USD 10 cart total."""
+    """Return a payment service and a gateway that records charge requests."""
     gateway = RecordingGateway(ChargeSucceeded("unused"))
     total_provider = (
         total_provider
@@ -96,7 +96,7 @@ def make_service(
 def assert_no_payment(
     session_factory: sessionmaker[Session], gateway: RecordingGateway
 ) -> None:
-    """Check that no attempt was reserved and no gateway call was made."""
+    """Verify that a request caused no payment or charge."""
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Payment)) == 0
     assert gateway.calls == []
@@ -319,7 +319,11 @@ def test_blocking_attempt_prevents_new_key(
 def seed_cart(
     engine: Engine, user_id: UUID, *, create_user: bool = False
 ) -> tuple[UUID, UUID]:
-    """Seed a nonempty cart and saved method; return their IDs in that order."""
+    """Create a nonempty cart and payment method for a user.
+
+    Returns:
+        The cart ID and payment method ID, in that order.
+    """
     cart_id, method_id, product_id = uuid4(), uuid4(), uuid4()
     with engine.begin() as connection:
         if create_user:

@@ -13,7 +13,7 @@ if not database_url:
 
 
 def run_migrations_offline() -> None:
-    """Generate SQL without connecting to the database."""
+    """Generate migration SQL."""
     context.configure(
         url=database_url,
         target_metadata=target_metadata,
@@ -25,7 +25,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    """Apply migrations using a database connection."""
+    """Apply database migrations."""
     engine = create_engine(database_url, poolclass=pool.NullPool)
     with engine.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

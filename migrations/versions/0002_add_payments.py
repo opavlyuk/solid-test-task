@@ -1,8 +1,4 @@
-"""Add payment attempts with per-user idempotency and cart blocking.
-
-Allow retries after confirmed failures while preventing multiple pending,
-successful, or uncertain attempts for the same cart.
-"""
+"""Add payment attempts with safeguards against duplicate charges."""
 
 from collections.abc import Sequence
 

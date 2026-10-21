@@ -1,4 +1,4 @@
-"""Mappings of the supplied shop schema."""
+"""Shop database models."""
 
 from datetime import datetime
 from decimal import Decimal

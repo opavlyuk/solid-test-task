@@ -1,4 +1,4 @@
-"""Reserve durable payment attempts and replay historical snapshots."""
+"""Payment reservation and replay."""
 
 from uuid import UUID
 
@@ -41,7 +41,7 @@ def _replay(payment: Payment, command: PayCart) -> PayCartResult:
 
 
 class PaymentService:
-    """Own reservation transactions and enforce payment eligibility and replay rules."""
+    """Payment coordinator enforcing eligibility and idempotency."""
 
     def __init__(
         self,
@@ -55,11 +55,11 @@ class PaymentService:
         self._store = PaymentStore()
 
     def pay(self, command: PayCart) -> PayCartResult:
-        """Reserve a pending attempt or replay a matching stored attempt.
+        """Reserve a payment attempt or replay a matching attempt.
 
-        New attempts commit before returning; this implementation does not charge.
-        Raise PaymentError for rejected requests or TotalUnavailable for missing
-        or invalid totals. Database and adapter programming errors propagate.
+        Raises:
+            PaymentError: The request is ineligible or conflicts with a payment.
+            TotalUnavailable: The cart total is missing or invalid.
         """
         reservation = self._reserve(command)
         if isinstance(reservation, PayCartResult):
@@ -71,7 +71,7 @@ class PaymentService:
             return PayCartResult(_payment_view(payment), replayed=False)
 
     def _reserve(self, command: PayCart) -> PayCartResult | ChargeRequest:
-        """Return a replay or charge details after committing a new reservation."""
+        """Return an existing payment result or reserve a new attempt."""
         try:
             with self._session_factory.begin() as session:
                 if not self._store.user_exists(session, command.user_id):
@@ -109,7 +109,11 @@ class PaymentService:
             return replay
 
     def _get_total(self, cart_id: UUID) -> Money:
-        """Validate adapter output without masking errors raised by the adapter."""
+        """Get a valid cart total.
+
+        Raises:
+            TotalUnavailable: The cart total is missing or invalid.
+        """
         supplied_total = self._total_provider.get_total(cart_id)
         try:
             return Money(supplied_total.amount, supplied_total.currency)
@@ -119,7 +123,14 @@ class PaymentService:
     def _recover_reservation(
         self, command: PayCart, error: IntegrityError
     ) -> PayCartResult | None:
-        """Resolve a known uniqueness conflict; return None to re-raise the error."""
+        """Recover a payment result after a reservation conflict.
+
+        Returns:
+            A matching result, or None if the conflict cannot be resolved.
+
+        Raises:
+            PaymentError: The request conflicts with an existing attempt.
+        """
         database_error = error.orig
         if not isinstance(database_error, UniqueViolation):
             return None

@@ -10,7 +10,7 @@ from payment_service.services.contracts import (
 
 
 class StubTotals:
-    """Return configured cart totals; report missing entries as unavailable."""
+    """Cart totals for tests."""
 
     def __init__(self, totals_by_cart: dict[UUID, Money]) -> None:
         self.totals_by_cart = totals_by_cart

@@ -68,7 +68,7 @@ def engine(migrated_engine: Engine) -> Iterator[Engine]:
 def session_factory(
     database_url: str, engine: Engine
 ) -> Iterator[sessionmaker[Session]]:
-    """Depend on engine for schema setup and table cleanup."""
+    """Provide sessions for an isolated test database."""
     orm_engine, factory = create_engine_and_sessions(database_url)
     try:
         yield factory
