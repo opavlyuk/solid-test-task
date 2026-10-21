@@ -75,10 +75,3 @@ class Payment(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
-
-    @property
-    def failure_code(self) -> str | None:
-        return {
-            PaymentStatus.FAILED: "card_declined",
-            PaymentStatus.UNKNOWN: "provider_unavailable",
-        }.get(self.status)
