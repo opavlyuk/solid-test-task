@@ -6,6 +6,8 @@ from flask import current_app, request
 
 from payment_service.services.contracts import PaymentError
 
+DEMO_USER_ID_HEADER = "X-User-ID"
+
 
 def demo_user_id() -> UUID:
     """Read the demo user's UUID from the current request's X-User-ID header.
@@ -19,6 +21,6 @@ def demo_user_id() -> UUID:
     if not current_app.config["ALLOW_DEMO_AUTH"]:
         raise PaymentError("unauthorized")
     try:
-        return UUID(request.headers.get("X-User-ID", ""))
+        return UUID(request.headers.get(DEMO_USER_ID_HEADER, ""))
     except ValueError as error:
         raise PaymentError("unauthorized") from error

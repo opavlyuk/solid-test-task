@@ -5,6 +5,10 @@ from uuid import UUID
 
 from payment_service.payment_status import PaymentStatus
 
+MAX_PAYMENT_AMOUNT = Decimal("9999999999.99")
+PAYMENT_AMOUNT_QUANTUM = Decimal("0.01")
+SUPPORTED_PAYMENT_CURRENCY = "USD"
+
 
 @dataclass(frozen=True)
 class Money:
@@ -14,11 +18,11 @@ class Money:
     def __post_init__(self) -> None:
         if not self.amount.is_finite():
             raise ValueError("Amount must be finite")
-        if not Decimal("0") < self.amount <= Decimal("9999999999.99"):
+        if not Decimal("0") < self.amount <= MAX_PAYMENT_AMOUNT:
             raise ValueError("Amount is outside the supported range")
-        if self.amount != self.amount.quantize(Decimal("0.01")):
+        if self.amount != self.amount.quantize(PAYMENT_AMOUNT_QUANTUM):
             raise ValueError("Amount must have at most two decimal places")
-        if self.currency != "USD":
+        if self.currency != SUPPORTED_PAYMENT_CURRENCY:
             raise ValueError("Only USD is supported")
 
 

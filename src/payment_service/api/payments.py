@@ -7,7 +7,7 @@ from uuid import UUID
 from apiflask import APIFlask
 from flask import g, request
 
-from payment_service.api.auth import demo_user_id
+from payment_service.api.auth import DEMO_USER_ID_HEADER, demo_user_id
 from payment_service.api.schemas import (
     CartInput,
     ErrorOutput,
@@ -30,7 +30,7 @@ def register_payments(app: APIFlask, service: PaymentService) -> None:
         # Identity is validated by the auth adapter to retain unauthorized responses.
         operation["parameters"].append(
             {
-                "name": "X-User-ID",
+                "name": DEMO_USER_ID_HEADER,
                 "in": "header",
                 "required": True,
                 "schema": {"type": "string", "format": "uuid"},

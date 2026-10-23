@@ -14,9 +14,27 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
+from payment_service.cart_status import CartStatus
 from payment_service.models.base import Base
+
+
+class _CartStatusText(TypeDecorator[CartStatus]):
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(
+        self, value: CartStatus | None, dialect: Dialect
+    ) -> str | None:
+        return value.value if value is not None else None
+
+    def process_result_value(
+        self, value: str | None, dialect: Dialect
+    ) -> CartStatus | None:
+        return CartStatus(value) if value is not None else None
 
 
 class User(Base):
@@ -68,7 +86,9 @@ class Cart(Base):
         primary_key=True, server_default=text("gen_random_uuid()")
     )
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
-    status: Mapped[str] = mapped_column(Text, server_default=text("'active'"))
+    status: Mapped[CartStatus] = mapped_column(
+        _CartStatusText(), server_default=text("'active'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

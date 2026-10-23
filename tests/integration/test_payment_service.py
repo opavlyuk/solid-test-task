@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from tests.fakes import RecordingGateway, StubTotals
 
+from payment_service.cart_status import CartStatus
 from payment_service.models import Cart, Payment
 from payment_service.payment_status import PaymentStatus
 from payment_service.services.contracts import (
@@ -38,6 +39,11 @@ from payment_service.services.payment_store import PaymentStore
 from payment_service.services.payments import PaymentService
 
 pytestmark = pytest.mark.integration
+
+REQUEST_WAIT_TIMEOUT_SECONDS = 5
+RESERVATION_RELEASE_TIMEOUT_SECONDS = 15
+LOCK_WAIT_TIMEOUT_SECONDS = 3
+LOCK_POLL_INTERVAL_SECONDS = 0.01
 
 
 @pytest.fixture
@@ -235,7 +241,7 @@ def test_success_persists_checkout_and_replays_without_adapters(
         assert payment.updated_at > payment.created_at
         cart = session.get(Cart, pay_command.cart_id)
         assert cart is not None
-        assert cart.status == "checked_out"
+        assert cart.status is CartStatus.CHECKED_OUT
         assert cart.updated_at == payment.updated_at
     replay_service, replay_gateway = make_service(
         session_factory, pay_command, StubTotals({})
@@ -343,7 +349,7 @@ def test_blocking_attempt_prevents_new_key(
         )
         cart = session.get(Cart, pay_command.cart_id)
         assert cart is not None
-        cart.status = "active"
+        cart.status = CartStatus.ACTIVE
     with pytest.raises(PaymentError) as error:
         service.pay(replace(pay_command, idempotency_key=uuid4()))
     assert error.value.code == "payment_exists"
@@ -460,7 +466,7 @@ def test_competing_carts_same_user_key_recover_from_unique_violation(
 
     class RacingTotals:
         def get_total(self, cart_id: UUID) -> Money:
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=REQUEST_WAIT_TIMEOUT_SECONDS)
             return Money(Decimal("10.00"), "USD")
 
     service, gateway = make_service(session_factory, pay_command, RacingTotals())
@@ -519,9 +525,9 @@ def test_same_cart_competition_returns_one_attempt(
     class PausingTotals:
         def get_total(self, cart_id: UUID) -> Money:
             cart_locked.set()
-            assert release_reservation.wait(timeout=15), (
-                "First reservation was not released"
-            )
+            assert release_reservation.wait(
+                timeout=RESERVATION_RELEASE_TIMEOUT_SECONDS
+            ), "First reservation was not released"
             return Money(Decimal("10.00"), "USD")
 
     monkeypatch.setattr(PaymentStore, "lock_cart", record_lock_request)
@@ -529,22 +535,27 @@ def test_same_cart_competition_returns_one_attempt(
     with ThreadPoolExecutor(max_workers=2) as executor:
         first_request = executor.submit(service.pay, pay_command)
         try:
-            assert cart_locked.wait(timeout=5), "First request did not reach totals"
+            assert cart_locked.wait(timeout=REQUEST_WAIT_TIMEOUT_SECONDS), (
+                "First request did not reach totals"
+            )
             second_request = executor.submit(service.pay, pay_command)
-            assert second_lock_requested.wait(timeout=5), (
+            assert second_lock_requested.wait(timeout=REQUEST_WAIT_TIMEOUT_SECONDS), (
                 "Second request did not reach the lock"
             )
-            deadline = monotonic() + 3
+            deadline = monotonic() + LOCK_WAIT_TIMEOUT_SECONDS
             with engine.connect() as connection:
                 while not connection.execute(
                     text("SELECT :first = ANY(pg_blocking_pids(:second))"),
                     {"first": backend_pids[0], "second": backend_pids[1]},
                 ).scalar_one():
                     assert monotonic() < deadline, "Second request never waited on cart"
-                    release_reservation.wait(timeout=0.01)
+                    release_reservation.wait(timeout=LOCK_POLL_INTERVAL_SECONDS)
         finally:
             release_reservation.set()
-        results = [first_request.result(timeout=5), second_request.result(timeout=5)]
+        results = [
+            first_request.result(timeout=REQUEST_WAIT_TIMEOUT_SECONDS),
+            second_request.result(timeout=REQUEST_WAIT_TIMEOUT_SECONDS),
+        ]
     assert results[0].payment.id == results[1].payment.id
     assert sorted(result.replayed for result in results) == [False, True]
     with session_factory() as session:

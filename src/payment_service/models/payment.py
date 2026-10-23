@@ -18,6 +18,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
 from payment_service.models.base import Base
+from payment_service.models.constraints import (
+    PAYMENTS_BLOCKING_CART_INDEX,
+    PAYMENTS_USER_KEY_CONSTRAINT,
+)
 from payment_service.payment_status import PaymentStatus
 
 
@@ -39,7 +43,9 @@ class _PaymentStatusText(TypeDecorator[PaymentStatus]):
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
-        UniqueConstraint("user_id", "idempotency_key", name="uq_payments_user_key"),
+        UniqueConstraint(
+            "user_id", "idempotency_key", name=PAYMENTS_USER_KEY_CONSTRAINT
+        ),
         CheckConstraint(
             "amount > 0 AND amount <= 9999999999.99", name="ck_payments_amount"
         ),
@@ -51,7 +57,7 @@ class Payment(Base):
             name="ck_payments_result",
         ),
         Index(
-            "uq_payments_blocking_cart",
+            PAYMENTS_BLOCKING_CART_INDEX,
             "cart_id",
             unique=True,
             postgresql_where=text("status IN ('pending', 'succeeded', 'unknown')"),

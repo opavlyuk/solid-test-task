@@ -7,7 +7,12 @@ from psycopg.errors import UniqueViolation
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from payment_service.cart_status import CartStatus
 from payment_service.models import Payment
+from payment_service.models.constraints import (
+    PAYMENTS_BLOCKING_CART_INDEX,
+    PAYMENTS_USER_KEY_CONSTRAINT,
+)
 from payment_service.payment_status import PaymentStatus
 from payment_service.services.contracts import (
     ChargeDeclined,
@@ -96,7 +101,7 @@ class PaymentService:
             if isinstance(outcome, ChargeSucceeded):
                 payment.status = PaymentStatus.SUCCEEDED
                 payment.provider_reference = outcome.provider_reference
-                cart.status = "checked_out"
+                cart.status = CartStatus.CHECKED_OUT
                 cart.updated_at = payment.updated_at
             elif isinstance(outcome, ChargeDeclined):
                 payment.status = PaymentStatus.FAILED
@@ -121,7 +126,7 @@ class PaymentService:
                 )
                 if existing is not None:
                     return _replay(existing, command)
-                if cart.status != "active":
+                if cart.status != CartStatus.ACTIVE:
                     raise PaymentError("cart_not_active")
                 if not self._store.has_items(session, cart.id):
                     raise PaymentError("empty_cart")
@@ -173,8 +178,8 @@ class PaymentService:
             return None
         constraint_name = database_error.diag.constraint_name
         if constraint_name not in {
-            "uq_payments_user_key",
-            "uq_payments_blocking_cart",
+            PAYMENTS_USER_KEY_CONSTRAINT,
+            PAYMENTS_BLOCKING_CART_INDEX,
         }:
             return None
         with self._session_factory() as session:
@@ -184,7 +189,7 @@ class PaymentService:
             if existing is not None:
                 return _replay(existing, command)
             if (
-                constraint_name == "uq_payments_blocking_cart"
+                constraint_name == PAYMENTS_BLOCKING_CART_INDEX
                 and self._store.find_blocking(session, command.cart_id) is not None
             ):
                 raise PaymentError("payment_exists") from error
